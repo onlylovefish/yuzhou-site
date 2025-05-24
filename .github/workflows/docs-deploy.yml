@@ -79,7 +79,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'pnpm'  # 指定使用 pnpm 缓存
+          # cache: 'pnpm'  # 指定使用 pnpm 缓存
       
       - name: Install pnpm
         run: npm install -g pnpm  # 确保安装了 pnpm
