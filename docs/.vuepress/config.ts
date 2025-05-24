@@ -14,7 +14,7 @@ import { defineUserConfig } from 'vuepress'
 import { plumeTheme } from 'vuepress-theme-plume'
 import {zhNotes} from './notes'
 export default defineUserConfig({
-  base: '/my-project/',
+  base: '/',
   lang: 'zh-CN',
   locales: {
     '/': {
