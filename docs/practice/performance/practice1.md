@@ -12,9 +12,9 @@ C端通常在移动端设备，调试及分析不像web侧方便，可以借助c
 
 [react-native-devTools](https://reactnative.dev/docs/react-native-devtools)等于C端页面的chrome打开检查，可以有控制台，组件渲染element以及profile，看下官方推荐的打开方式[debugger](https://reactnative.dev/docs/debugging)，不过一般公司的app的native团队都有做一些工具，可以走工具入口，笔者公司主要是shake->远程调试即可（PS：ios），如果是安卓，需要进入设置，狂点logo，进入调试，在打开远程调试
 <div style="display: flex; gap: 16px; flex-wrap: wrap;">
-  <img src="./image.png" alt="图片1" style="flex:1 1 aoto; max-width:200px; height:auto; border-radius:8px;" />
-  <img src="./image-1.png" alt="图片2" style="flex:1 1 aoto; max-width:200px; height:auto; border-radius:8px;" />
-  <img src="./image-2.png" alt="图片3" style="flex:1 1 aoto; max-width:200px; height:auto; border-radius:8px;" />
+  <img src="./img/image.png" alt="图片1" style="flex:1 1 aoto; max-width:200px; height:auto; border-radius:8px;" />
+  <img src="./img/image-1.png" alt="图片2" style="flex:1 1 aoto; max-width:200px; height:auto; border-radius:8px;" />
+  <img src="./img/image-2.png" alt="图片3" style="flex:1 1 aoto; max-width:200px; height:auto; border-radius:8px;" />
 
 </div>
 
@@ -47,7 +47,7 @@ if (process.env.NODE_ENV === 'development') {
 ## 优化点
 上面介绍了我们在性能分析中常见的一些工具，接下来我们细聊一下我们日常优化中可以发力的一些方向，笔者日常工作中理解，我们页面的渲染主要经历如下几个阶段
 
-<img src="./pageLoad.png">
+<img src="./img/pageLoad.png">
 
 所以我们也就可以针对这几个阶段做一些优化事项
 

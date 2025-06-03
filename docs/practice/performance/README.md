@@ -2,7 +2,7 @@
 
 - [老仓库性能分析及优化实践](/yuzhou-site/practice/performance/practice1)
 
-- [另一个优化实践](/practice/performance/practice2)
+- [另一个优化实践](/practice/performance/practice2.md)
 
 <!-- <Card
   title="老仓库性能分析及优化实践"
