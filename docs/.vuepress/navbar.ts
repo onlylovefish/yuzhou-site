@@ -13,6 +13,7 @@ export const zhNavbar = defineNavbarConfig([
   { text: '工作实践💻', items: [
     { text: '性能优化', link: '/practice/performance/' },
     { text: 'UI', link: '/practice/UI/' },
+    {text:'逻辑层', link: '/practice/logic/'},
     // 可以继续添加更多子项
   ] },
   { text: '手撕系列🔧', link: '/blog/archives/' },
