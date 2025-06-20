@@ -1,7 +1,7 @@
 ---
 title: 动态配置js脚本
 createTime: 2025/06/16 11:30
-# permalink: /article/lcp4m0qd/
+permalink: /article/rogyh2qr/
 ---
 
 笔者最近遇到一个实践，需要给所有的h5页面添加一部分上报的函数，简单说就是一坨sdk接入逻辑
