@@ -168,7 +168,7 @@ export default defineUserConfig({
      * @see https://theme-plume.vuejs.press/guide/features/comments/
      */
     comment: {
-      provider: 'Artalk', // "Artalk" | "Giscus" | "Twikoo" | "Waline"
+      provider: 'Giscus', // "Artalk" | "Giscus" | "Twikoo" | "Waline"
       comment: true,
       repo: '',
       repoId: '',

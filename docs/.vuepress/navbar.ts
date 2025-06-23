@@ -18,7 +18,10 @@ export const zhNavbar = defineNavbarConfig([
   //   {text:'逻辑层', link: '/practice/logic/'},
   //   // 可以继续添加更多子项
   // ] },
-  
+  {
+    text: 'leetCode💡',
+    link: '/leetcode/',
+  },
   {
     text: '开卷有益📖',
     items: [{ text: '示例', link: '/notes/demo/README.md' }]
