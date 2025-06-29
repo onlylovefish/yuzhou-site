@@ -134,6 +134,13 @@ https://data.cma.cn/ jsAppend:///Users/yuanlu/workspace/waterHome/yuzhou-site/do
 ```
 ![alt text](./img/whistle插入js.png)
 
+**5. html注入**
+```bash
+data.cma.cn htmlAppend://{test.html}
+```
+![alt text](./img/注入内容.png)
+![alt text](./img/html注入.png)
+
 ## 插件
 ### whistle inspect
 用于往页面中插入vconsole.可以看到一些调试的console信息
@@ -148,7 +155,8 @@ if (req.url.includes('/api/test')) {
   res.body = JSON.stringify({ msg: 'mock data' });
 }
 ```
-
+### whistle weinre
+data.cma.cn weinre://
 
 ## 利用whistle查看页面日志
 
