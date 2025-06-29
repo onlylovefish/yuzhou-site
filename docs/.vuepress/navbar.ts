@@ -24,7 +24,8 @@ export const zhNavbar = defineNavbarConfig([
   },
   {
     text: '开卷有益📖',
-    items: [{ text: '示例', link: '/notes/demo/README.md' }]
+    link: '/read/',
+    // items: [{ text: '示例', link: '/notes/demo/README.md' }]
   },
    { text: '归档', link: '/blog/archives/' },
 ])
