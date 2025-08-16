@@ -67,7 +67,7 @@ export default defineThemeConfig({
       },
 
       navbar: zhNavbar,
-      // notes: zhNotes,
+      notes: zhNotes,
 
       /**
        * 公告板
