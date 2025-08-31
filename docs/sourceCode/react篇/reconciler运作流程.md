@@ -137,3 +137,141 @@ export function scheduleUpdateOnFiber(
   }
 }
 ```
+## 注册调度任务
+主要功能
+
+1. 加入调度队列
+如果当前 root 没有在调度队列里，就把它加入（通过链表管理多个 root）。
+
+2. 标记有待处理的同步任务
+设置 mightHavePendingSyncWork = true，表示有可能有同步任务需要处理。
+
+3. 确保调度任务已注册
+调用 ensureScheduleIsScheduled()，保证有微任务或调度任务会在事件循环后处理这些 root 的更新。
+
+4. 测试环境特殊处理
+在开发和测试环境下，做一些特殊标记（比如 act 测试相关）。
+```js
+export function ensureRootIsScheduled(root: FiberRoot): void {
+  // This function is called whenever a root receives an update. It does two
+  // things 1) it ensures the root is in the root schedule, and 2) it ensures
+  // there's a pending microtask to process the root schedule.
+  //
+  // Most of the actual scheduling logic does not happen until
+  // `scheduleTaskForRootDuringMicrotask` runs.
+
+  // Add the root to the schedule
+  if (root === lastScheduledRoot || root.next !== null) {
+    // Fast path. This root is already scheduled.
+  } else {
+    if (lastScheduledRoot === null) {
+      firstScheduledRoot = lastScheduledRoot = root;
+    } else {
+      lastScheduledRoot.next = root;
+      lastScheduledRoot = root;
+    }
+  }
+
+  // Any time a root received an update, we set this to true until the next time
+  // we process the schedule. If it's false, then we can quickly exit flushSync
+  // without consulting the schedule.
+  mightHavePendingSyncWork = true;
+
+  ensureScheduleIsScheduled();
+
+  if (
+    __DEV__ &&
+    !disableLegacyMode &&
+    ReactSharedInternals.isBatchingLegacy &&
+    root.tag === LegacyRoot
+  ) {
+    // Special `act` case: Record whenever a legacy update is scheduled.
+    ReactSharedInternals.didScheduleLegacyUpdate = true;
+  }
+}
+```
+
+## 执行回调
+在上述任务注册后，加入调度队列，随后会去调用performWorkOnRoot
+```js
+// 注册任务
+ensureRootIsScheduled(root) {
+  // ...加入调度队列...
+  ensureScheduleIsScheduled(); // 注册调度任务
+}
+
+// 注册的任务内容
+scheduleCallback(priority, () => {
+  // ...最终会调用...
+  performWorkOnRoot(root, lanes, forceSync);
+});
+```
+
+可以看到上面的调用```ensureRootIsScheduled```，该函数内部会调用```ensureScheduleIsScheduled```,最终会用 scheduleCallback 注册一个调度任务（比如微任务或宏任务）。
+```js
+function scheduleImmediateRootScheduleTask() {
+  if (__DEV__ && ReactSharedInternals.actQueue !== null) {
+    // Special case: Inside an `act` scope, we push microtasks to the fake `act`
+    // callback queue. This is because we currently support calling `act`
+    // without awaiting the result. The plan is to deprecate that, and require
+    // that you always await the result so that the microtasks have a chance to
+    // run. But it hasn't happened yet.
+    ReactSharedInternals.actQueue.push(() => {
+      processRootScheduleInMicrotask();
+      return null;
+    });
+  }
+
+  // TODO: Can we land supportsMicrotasks? Which environments don't support it?
+  // Alternatively, can we move this check to the host config?
+  if (supportsMicrotasks) {
+    scheduleMicrotask(() => {
+      // In Safari, appending an iframe forces microtasks to run.
+      // https://github.com/facebook/react/issues/22459
+      // We don't support running callbacks in the middle of render
+      // or commit so we need to check against that.
+      const executionContext = getExecutionContext();
+      if ((executionContext & (RenderContext | CommitContext)) !== NoContext) {
+        // Note that this would still prematurely flush the callbacks
+        // if this happens outside render or commit phase (e.g. in an event).
+
+        // Intentionally using a macrotask instead of a microtask here. This is
+        // wrong semantically but it prevents an infinite loop. The bug is
+        // Safari's, not ours, so we just do our best to not crash even though
+        // the behavior isn't completely correct.
+        Scheduler_scheduleCallback(
+          ImmediateSchedulerPriority,
+          processRootScheduleInImmediateTask,
+        );
+        return;
+      }
+      processRootScheduleInMicrotask();
+    });
+  } else {
+    // If microtasks are not supported, use Scheduler.
+    Scheduler_scheduleCallback(
+      ImmediateSchedulerPriority,
+      processRootScheduleInImmediateTask,
+    );
+  }
+}
+```
+上面函数中Scheduler_scheduleCallback，scheduleCallback 实际就是调用 Scheduler_scheduleCallback（或者在测试环境下用 actQueue）。
+
+当 Scheduler 认为可以执行时（比如浏览器空闲、优先级满足等），会回调执行任务，这个任务的内容就是调用 performWorkOnRoot(root, lanes, forceSync)。
+
+performWorkOnRoot 会根据优先级选择同步或并发的 work loop，开始遍历和构建 Fiber 树，完成渲染和提交。
+
+
+接着往```processRootScheduleInImmediateTask```追踪实现，可以发现
+```js
+const newCallbackNode = scheduleCallback(
+      schedulerPriorityLevel,
+      performWorkOnRootViaSchedulerTask.bind(null, root),
+    );
+```
+而```performWorkOnRootViaSchedulerTask```最终会调用```performWorkOnRoot(root, lanes, forceSync);```
+
+performWorkOnRoot主要为了Fiber树的构造，错误处理，以及调用输出
+
+输出走到```finishConcurrentRender```
