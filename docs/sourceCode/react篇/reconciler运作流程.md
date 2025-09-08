@@ -275,3 +275,30 @@ const newCallbackNode = scheduleCallback(
 performWorkOnRoot主要为了Fiber树的构造，错误处理，以及调用输出
 
 输出走到```finishConcurrentRender```
+
+## 输出
+
+该部分调用的是commitRoot，
+```js
+function commitRoot(
+  root: FiberRoot,
+  finishedWork: null | Fiber,
+  lanes: Lanes,
+  recoverableErrors: null | Array<CapturedValue<mixed>>,
+  transitions: Array<Transition> | null,
+  didIncludeRenderPhaseUpdate: boolean,
+  spawnedLane: Lane,
+  updatedLanes: Lanes,
+  suspendedRetryLanes: Lanes,
+  exitStatus: RootExitStatus,
+  suspendedCommitReason: SuspendedCommitReason, // Profiling-only
+  completedRenderStartTime: number, // Profiling-only
+  completedRenderEndTime: number, // Profiling-only
+)
+```
+
+主要流程如下
+1. 执行 mutation（如 DOM 节点插入/删除/属性变更）
+2. 执行 layout effects（如 useLayoutEffect）
+3. 执行 passive effects（如 useEffect）
+4. 处理错误、调度后续任务等
