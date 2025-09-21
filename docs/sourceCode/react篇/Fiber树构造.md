@@ -27,3 +27,37 @@ JavaScript可以访问和操作存储在 DOM 中的内容, 也就是操作DOM对
 
 Fiber树通过ReactElement生成，Fiber树是DOM树的数据模型，Fiber树驱动DOM
 
+## ReactFiberWorkLoop中全局变量
+在React运行中，ReactFiberWorkLoop中有很多变量，属于模块级闭包变量，随着Fiber树构造循环的进行而变化
+```js
+let executionContext: ExecutionContext = NoContext;
+let workInProgressRoot: FiberRoot | null = null;
+let workInProgress: Fiber | null = null;
+let workInProgressRootRenderLanes: Lanes = NoLanes;
+let workInProgressSuspendedReason: SuspendedReason = NotSuspended;
+let workInProgressThrownValue: mixed = null;
+// ... 以及很多其他变量
+```
+
+### 执行上下文
+在全局变量中有```executionContext```,代表渲染期间的执行栈（执行上下文），是二进制表示变量，通过位运算进行操作，共有如下几种执行栈
+```js
+type ExecutionContext = number;
+
+export const NoContext = /*             */ 0b000;
+const BatchedContext = /*               */ 0b001;
+export const RenderContext = /*         */ 0b010;
+export const CommitContext = /*         */ 0b100;
+
+```
+
+在```scheduleUpdateOnFiber```中会根据executionContext进行不同逻辑执行，而在渲染更新中会更新executionContext,比如比如：
+```js
+renderRootSync
+renderRootConcurrent
+performWorkOnRoot
+flushSyncFromReconciler
+batchedUpdates
+discreteUpdates
+```
+以及 commit 相关流程,这些函数会在进入渲染或提交阶段时设置 executionContext
