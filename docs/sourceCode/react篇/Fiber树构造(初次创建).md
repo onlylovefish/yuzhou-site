@@ -1133,7 +1133,108 @@ function completeWork(
 
 以下举🌰说明
 ##### HostComponent
+```js
+ case HostComponent: {
+      popHostContext(workInProgress);
+      const type = workInProgress.type;
+      if (current !== null && workInProgress.stateNode != null) {
+        updateHostComponent(
+          current,
+          workInProgress,
+          type,
+          newProps,
+          renderLanes,
+        );
+      } else {
+        if (!newProps) {
+          if (workInProgress.stateNode === null) {
+            throw new Error(
+              'We must have new props for new mounts. This error is likely ' +
+                'caused by a bug in React. Please file an issue.',
+            );
+          }
 
+          // This can happen when we abort work.
+          bubbleProperties(workInProgress);
+          if (enableViewTransition) {
+            // Host Components act as their own View Transitions which doesn't run enter/exit animations.
+            // We clear any ViewTransitionStatic flag bubbled from inner View Transitions.
+            workInProgress.subtreeFlags &= ~ViewTransitionStatic;
+          }
+          return null;
+        }
+
+        const currentHostContext = getHostContext();
+        // TODO: Move createInstance to beginWork and keep it on a context
+        // "stack" as the parent. Then append children as we go in beginWork
+        // or completeWork depending on whether we want to add them top->down or
+        // bottom->up. Top->down is faster in IE11.
+        const wasHydrated = popHydrationState(workInProgress);
+        if (wasHydrated) {
+          // TODO: Move this and createInstance step into the beginPhase
+          // to consolidate.
+          prepareToHydrateHostInstance(workInProgress, currentHostContext);
+          if (
+            finalizeHydratedChildren(
+              workInProgress.stateNode,
+              type,
+              newProps,
+              currentHostContext,
+            )
+          ) {
+            workInProgress.flags |= Hydrate;
+          }
+        } else {
+          const rootContainerInstance = getRootHostContainer();
+          const instance = createInstance(
+            type,
+            newProps,
+            rootContainerInstance,
+            currentHostContext,
+            workInProgress,
+          );
+          // TODO: For persistent renderers, we should pass children as part
+          // of the initial instance creation
+          markCloned(workInProgress);
+          appendAllChildren(instance, workInProgress, false, false);
+          workInProgress.stateNode = instance;
+
+          // Certain renderers require commit-time effects for initial mount.
+          // (eg DOM renderer supports auto-focus for certain elements).
+          // Make sure such renderers get scheduled for later work.
+          if (
+            finalizeInitialChildren(
+              instance,
+              type,
+              newProps,
+              currentHostContext,
+            )
+          ) {
+            markUpdate(workInProgress);
+          }
+        }
+      }
+      bubbleProperties(workInProgress);
+      if (enableViewTransition) {
+        // Host Components act as their own View Transitions which doesn't run enter/exit animations.
+        // We clear any ViewTransitionStatic flag bubbled from inner View Transitions.
+        workInProgress.subtreeFlags &= ~ViewTransitionStatic;
+      }
+
+      // This must come at the very end of the complete phase, because it might
+      // throw to suspend, and if the resource immediately loads, the work loop
+      // will resume rendering as if the work-in-progress completed. So it must
+      // fully complete.
+      preloadInstanceAndSuspendIfNeeded(
+        workInProgress,
+        workInProgress.type,
+        current === null ? null : current.memoizedProps,
+        workInProgress.pendingProps,
+        renderLanes,
+      );
+      return null;
+    }
+```
 针对其中的HostComponent说明，HostComponent 表示原生宿主节点，比如 DOM 的 ```<div>, <span>``` 等。
 
 在 React Fiber 树中，每个 HostComponent Fiber 对应一个真实的宿主实例（如 DOM 节点）。``` if (current !== null && workInProgress.stateNode != null)```说明是更新，调用 updateHostComponent，对比 props，决定是否需要打 Update 标记。否则是首次挂载，需要创建 DOM 实例。
@@ -1154,6 +1255,10 @@ function completeWork(
 2. 副作用冒泡bubbleProperties
 
 调用 bubbleProperties，把子树的副作用和优先级合并到当前节点。
+
+```js
+createInstance
+```
 
 ##### HostRoot
 ```js
