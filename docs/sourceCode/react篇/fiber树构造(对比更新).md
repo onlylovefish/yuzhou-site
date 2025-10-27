@@ -67,6 +67,7 @@ Component.prototype.setState = function (partialState, callback) {
 };
 ```
 ```enqueueSetState```实际最终会调用```scheduleUpdateOnFiber```
+
 ```js
 const classComponentUpdater = {
   // $FlowFixMe[missing-local-annot]
@@ -224,6 +225,89 @@ export function scheduleUpdateOnFiber(
   }
 }
   ```
+
+
+## 对比更新与初次渲染不同点
+
+```markUpdateLaneFromFiberToRoot```在对比更新阶段，找出fiber树中受到本次update影响的所有节点，并设置这些节点的```fiber.lanes```或```fiber.childLanes```(用于fiber树构造使用)
+```js
+
+function markUpdateLaneFromFiberToRoot(
+  sourceFiber: Fiber,
+  update: ConcurrentUpdate | null,
+  lane: Lane,
+): null | FiberRoot {
+  // Update the source fiber's lanes
+  // 将update优先级设置到sourceFiber.lanes
+  sourceFiber.lanes = mergeLanes(sourceFiber.lanes, lane);
+  let alternate = sourceFiber.alternate;
+  if (alternate !== null) {
+    // 同时设置sourceFiber.alternate的优先级
+    alternate.lanes = mergeLanes(alternate.lanes, lane);
+  }
+  // Walk the parent path to the root and update the child lanes.
+  let isHidden = false;
+  let parent = sourceFiber.return;
+  let node = sourceFiber;
+  /**
+   * 从sourceFiber开始，向上遍历所有节点，直到hostRoot，设置沿途所有节点的childLanes
+   */
+  while (parent !== null) {
+    parent.childLanes = mergeLanes(parent.childLanes, lane);
+    alternate = parent.alternate;
+    if (alternate !== null) {
+      alternate.childLanes = mergeLanes(alternate.childLanes, lane);
+    }
+
+    if (parent.tag === OffscreenComponent) {
+      // Check if this offscreen boundary is currently hidden.
+      //
+      // The instance may be null if the Offscreen parent was unmounted. Usually
+      // the parent wouldn't be reachable in that case because we disconnect
+      // fibers from the tree when they are deleted. However, there's a weird
+      // edge case where setState is called on a fiber that was interrupted
+      // before it ever mounted. Because it never mounts, it also never gets
+      // deleted. Because it never gets deleted, its return pointer never gets
+      // disconnected. Which means it may be attached to a deleted Offscreen
+      // parent node. (This discovery suggests it may be better for memory usage
+      // if we don't attach the `return` pointer until the commit phase, though
+      // in order to do that we'd need some other way to track the return
+      // pointer during the initial render, like on the stack.)
+      //
+      // This case is always accompanied by a warning, but we still need to
+      // account for it. (There may be other cases that we haven't discovered,
+      // too.)
+      const offscreenInstance: OffscreenInstance | null = parent.stateNode;
+      if (
+        offscreenInstance !== null &&
+        !(offscreenInstance._visibility & OffscreenVisible)
+      ) {
+        isHidden = true;
+      }
+    }
+
+    node = parent;
+    parent = parent.return;
+  }
+
+  if (node.tag === HostRoot) {
+    const root: FiberRoot = node.stateNode;
+    if (isHidden && update !== null) {
+      markHiddenUpdate(root, update, lane);
+    }
+    return root;
+  }
+  return null;
+}
+
+```
+
+![alt text](./img/markUpdateLaneFromFiberToRoot图.png)
+
+### 对比更新scheduler
+对比更新没有直接调用performSyncWorkOnRoot，通过Scheduler调度更新，调用链路
+```performSyncWorkOnRoot--->renderRootSync--->workLoopSync```与初次构造中的一致
+
 
 在```classComponentUpdater```中通过
 ```js
