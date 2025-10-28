@@ -308,6 +308,379 @@ function markUpdateLaneFromFiberToRoot(
 对比更新没有直接调用performSyncWorkOnRoot，通过Scheduler调度更新，调用链路
 ```performSyncWorkOnRoot--->renderRootSync--->workLoopSync```与初次构造中的一致
 
+在进入循环构造(workLooopSync)前，会刷新栈帧（prepareFreshStack）,详细见```renderRootSync```关键逻辑
+```js
+function renderRootSync(root: FiberRoot, lanes: Lanes) {
+  const prevExecutionContext = executionContext;
+  executionContext |= RenderContext;
+  // 如果fiberRoot变动, 或者update.lane变动, 都会刷新栈帧, 丢弃上一次渲染进度
+  if (workInProgressRoot !== root || workInProgressRootRenderLanes !== lanes) {
+    // 刷新栈帧, legacy模式下都会进入
+    prepareFreshStack(root, lanes);
+  }
+  do {
+    try {
+      workLoopSync();
+      break;
+    } catch (thrownValue) {
+      handleError(root, thrownValue);
+    }
+  } while (true);
+  executionContext = prevExecutionContext;
+  // 重置全局变量, 表明render结束
+  workInProgressRoot = null;
+  workInProgressRootRenderLanes = NoLanes;
+  return workInProgressRootExitStatus;
+}
+```
+![alt text](./img/对比更新刷新栈帧后.png)
+
+- fiberRoot.current指向与当前页面对应的fiber树, workInProgress指向正在构造的fiber树.
+- 刷新栈帧会调用createWorkInProgress(), 使得workInProgress.flags和workInProgress.effects都已经被重置. 且workInProgress.child = current.child. 所以在进入循环构造之前, HostRootFiber与HostRootFiber.alternate共用一个child(这里是fiber(<App/>)).
+
+
+
+## 循环构造workLoopSync
+在初次构造时，整个流程事一个深度优先遍历，其中有2个重要的变量```workInProgress```和```current```(双缓冲技术)
+
+- workInProgress和current都视为指针
+- workInProgress指向当前正在构造的fiber节点
+- current = workInProgress.alternate(即fiber.alternate), 指向当前页面正在使用的fiber节点.
+
+在深度优先遍历中，每个fiber节点会经历2个阶段：
+1. 探寻阶段```beginWork```
+2. 回溯阶段```completeWork```
+
+```js
+// The work loop is an extremely hot path. Tell Closure not to inline it.
+/** @noinline */
+function workLoopSync() {
+  // Perform work without checking if we need to yield between fiber.
+  while (workInProgress !== null) {
+    performUnitOfWork(workInProgress);
+  }
+}
+```
+
+```js
+function performUnitOfWork(unitOfWork: Fiber): void {
+  // The current, flushed, state of this fiber is the alternate. Ideally
+  // nothing should rely on this, but relying on it here means that we don't
+  // need an additional field on the work in progress.
+  // unitOfWork就是被传入的workInProgress
+  const current = unitOfWork.alternate;
+
+  let next;
+  if (enableProfilerTimer && (unitOfWork.mode & ProfileMode) !== NoMode) {
+    startProfilerTimer(unitOfWork);
+   
+    next = beginWork(current, unitOfWork, entangledRenderLanes);
+    
+    stopProfilerTimerIfRunningAndRecordDuration(unitOfWork);
+  } else {
+  
+    next = beginWork(current, unitOfWork, entangledRenderLanes);
+    
+  }
+
+  unitOfWork.memoizedProps = unitOfWork.pendingProps;
+  if (next === null) {
+    // If this doesn't spawn new work, complete the current work.
+    // 如果没有派生出新的节点, 则进入completeWork阶段, 传入的是当前unitOfWork
+    completeUnitOfWork(unitOfWork);
+  } else {
+    workInProgress = next;
+  }
+}
+```
+注意：在对比更新过程中```current=unitOfWork.alternate```不为null，后续的调用会大量使用此处传入的current
+```js
+function beginWork(
+  current: Fiber | null,
+  workInProgress: Fiber,
+  renderLanes: Lanes,
+): Fiber | null {
+  
+  // 进入对比
+  if (current !== null) {
+    const oldProps = current.memoizedProps;
+    const newProps = workInProgress.pendingProps;
+
+    if (
+      oldProps !== newProps ||
+      hasLegacyContextChanged() ||
+      // Force a re-render if the implementation changed due to hot reload:
+      (__DEV__ ? workInProgress.type !== current.type : false)
+    ) {
+      // If props or context changed, mark the fiber as having performed work.
+      // This may be unset if the props are determined to be equal later (memo).
+      didReceiveUpdate = true;
+    } else {
+      // Neither props nor legacy context changes. Check if there's a pending
+      // update or context change.
+      const hasScheduledUpdateOrContext = checkScheduledUpdateOrContext(
+        current,
+        renderLanes,
+      );
+      if (
+        !hasScheduledUpdateOrContext &&
+        // If this is the second pass of an error or suspense boundary, there
+        // may not be work scheduled on `current`, so we check for this flag.
+        (workInProgress.flags & DidCapture) === NoFlags
+      ) {
+        // No pending updates or context. Bail out now.
+        didReceiveUpdate = false;
+
+        // 当前节点无需更新，循环检测子节点是否需要更新
+        return attemptEarlyBailoutIfNoScheduledUpdate(
+          current,
+          workInProgress,
+          renderLanes,
+        );
+      }
+      if ((current.flags & ForceUpdateForLegacySuspense) !== NoFlags) {
+        // This is a special case that only exists for legacy mode.
+        // See https://github.com/facebook/react/pull/19216.
+        didReceiveUpdate = true;
+      } else {
+        // An update was scheduled on this fiber, but there are no new props
+        // nor legacy context. Set this to false. If an update queue or context
+        // consumer produces a changed value, it will set this to true. Otherwise,
+        // the component will assume the children have not changed and bail out.
+        didReceiveUpdate = false;
+      }
+    }
+  } else {
+    didReceiveUpdate = false;
+
+    if (getIsHydrating() && isForkedChild(workInProgress)) {
+      // Check if this child belongs to a list of muliple children in
+      // its parent.
+      //
+      // In a true multi-threaded implementation, we would render children on
+      // parallel threads. This would represent the beginning of a new render
+      // thread for this subtree.
+      //
+      // We only use this for id generation during hydration, which is why the
+      // logic is located in this special branch.
+      const slotIndex = workInProgress.index;
+      const numberOfForks = getForksAtLevel(workInProgress);
+      pushTreeId(workInProgress, numberOfForks, slotIndex);
+    }
+  }
+
+  // Before entering the begin phase, clear pending update priority.
+  // TODO: This assumes that we're about to evaluate the component and process
+  // the update queue. However, there's an exception: SimpleMemoComponent
+  // sometimes bails out later in the begin phase. This indicates that we should
+  // move this assignment out of the common path and into each branch.
+  workInProgress.lanes = NoLanes;
+
+  switch (workInProgress.tag) {
+    case LazyComponent: {
+      const elementType = workInProgress.elementType;
+      return mountLazyComponent(
+        current,
+        workInProgress,
+        elementType,
+        renderLanes,
+      );
+    }
+    case FunctionComponent: {
+      const Component = workInProgress.type;
+      return updateFunctionComponent(
+        current,
+        workInProgress,
+        Component,
+        workInProgress.pendingProps,
+        renderLanes,
+      );
+    }
+    case ClassComponent: {
+      const Component = workInProgress.type;
+      const unresolvedProps = workInProgress.pendingProps;
+      const resolvedProps = resolveClassComponentProps(
+        Component,
+        unresolvedProps,
+      );
+      return updateClassComponent(
+        current,
+        workInProgress,
+        Component,
+        resolvedProps,
+        renderLanes,
+      );
+    }
+    case HostRoot:
+      return updateHostRoot(current, workInProgress, renderLanes);
+    case HostHoistable:
+      if (supportsResources) {
+        return updateHostHoistable(current, workInProgress, renderLanes);
+      }
+    // Fall through
+    case HostSingleton:
+      if (supportsSingletons) {
+        return updateHostSingleton(current, workInProgress, renderLanes);
+      }
+    // Fall through
+    case HostComponent:
+      return updateHostComponent(current, workInProgress, renderLanes);
+    case HostText:
+      return updateHostText(current, workInProgress);
+    case SuspenseComponent:
+      return updateSuspenseComponent(current, workInProgress, renderLanes);
+    case HostPortal:
+      return updatePortalComponent(current, workInProgress, renderLanes);
+    case ForwardRef: {
+      return updateForwardRef(
+        current,
+        workInProgress,
+        workInProgress.type,
+        workInProgress.pendingProps,
+        renderLanes,
+      );
+    }
+    case Fragment:
+      return updateFragment(current, workInProgress, renderLanes);
+    case Mode:
+      return updateMode(current, workInProgress, renderLanes);
+    case Profiler:
+      return updateProfiler(current, workInProgress, renderLanes);
+    case ContextProvider:
+      return updateContextProvider(current, workInProgress, renderLanes);
+    case ContextConsumer:
+      return updateContextConsumer(current, workInProgress, renderLanes);
+    case MemoComponent: {
+      return updateMemoComponent(
+        current,
+        workInProgress,
+        workInProgress.type,
+        workInProgress.pendingProps,
+        renderLanes,
+      );
+    }
+    case SimpleMemoComponent: {
+      return updateSimpleMemoComponent(
+        current,
+        workInProgress,
+        workInProgress.type,
+        workInProgress.pendingProps,
+        renderLanes,
+      );
+    }
+    case IncompleteClassComponent: {
+      if (disableLegacyMode) {
+        break;
+      }
+      const Component = workInProgress.type;
+      const unresolvedProps = workInProgress.pendingProps;
+      const resolvedProps = resolveClassComponentProps(
+        Component,
+        unresolvedProps,
+      );
+      return mountIncompleteClassComponent(
+        current,
+        workInProgress,
+        Component,
+        resolvedProps,
+        renderLanes,
+      );
+    }
+    case IncompleteFunctionComponent: {
+      if (disableLegacyMode) {
+        break;
+      }
+      const Component = workInProgress.type;
+      const unresolvedProps = workInProgress.pendingProps;
+      const resolvedProps = resolveClassComponentProps(
+        Component,
+        unresolvedProps,
+      );
+      return mountIncompleteFunctionComponent(
+        current,
+        workInProgress,
+        Component,
+        resolvedProps,
+        renderLanes,
+      );
+    }
+    case SuspenseListComponent: {
+      return updateSuspenseListComponent(current, workInProgress, renderLanes);
+    }
+    case ScopeComponent: {
+      if (enableScopeAPI) {
+        return updateScopeComponent(current, workInProgress, renderLanes);
+      }
+      break;
+    }
+    case ActivityComponent: {
+      return updateActivityComponent(current, workInProgress, renderLanes);
+    }
+    case OffscreenComponent: {
+      return updateOffscreenComponent(
+        current,
+        workInProgress,
+        renderLanes,
+        workInProgress.pendingProps,
+      );
+    }
+    case LegacyHiddenComponent: {
+      if (enableLegacyHidden) {
+        return updateLegacyHiddenComponent(
+          current,
+          workInProgress,
+          renderLanes,
+        );
+      }
+      break;
+    }
+    case CacheComponent: {
+      return updateCacheComponent(current, workInProgress, renderLanes);
+    }
+    case TracingMarkerComponent: {
+      if (enableTransitionTracing) {
+        return updateTracingMarkerComponent(
+          current,
+          workInProgress,
+          renderLanes,
+        );
+      }
+      break;
+    }
+    case ViewTransitionComponent: {
+      if (enableViewTransition) {
+        return updateViewTransition(current, workInProgress, renderLanes);
+      }
+      break;
+    }
+    case Throw: {
+      // This represents a Component that threw in the reconciliation phase.
+      // So we'll rethrow here. This might be a Thenable.
+      throw workInProgress.pendingProps;
+    }
+  }
+
+  throw new Error(
+    `Unknown unit of work tag (${workInProgress.tag}). This error is likely caused by a bug in ` +
+      'React. Please file an issue.',
+  );
+}
+```
+```js
+function attemptEarlyBailoutIfNoScheduledUpdate(
+  current: Fiber,
+  workInProgress: Fiber,
+  renderLanes: Lanes,
+) {
+  // This fiber does not have any pending work. Bailout without entering
+  // the begin phase. There's still some bookkeeping we that needs to be done
+  // in this optimized path, mostly pushing stuff onto the stack.
+  switch (workInProgress.tag) {
+  //  省略
+  }
+  return bailoutOnAlreadyFinishedWork(current, workInProgress, renderLanes);
+}
+```
 
 在```classComponentUpdater```中通过
 ```js

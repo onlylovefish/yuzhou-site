@@ -1504,3 +1504,17 @@ function bubbleProperties(completedWork: Fiber) {
   return didBailout;
 }
 ```
+
+### 补充
+
+- workInProgressRoot：当前渲染的 FiberRoot（根）。
+- rootWorkInProgress：根节点的 workInProgress Fiber（副本）。
+- workInProgress：当前正在处理的 Fiber 节点。
+
+workInProgressRoot
+      |
+      v
+root.current  <---(createWorkInProgress)--->  rootWorkInProgress
+                                                |
+                                                v
+                                         workInProgress (遍历时指向当前节点)
