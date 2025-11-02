@@ -11,4 +11,11 @@
 - [工作循环](./react篇/工作循环.md)
 
 - [react启动（web）](./react篇/react启动（web）.md)
-<!-- - [react源码涉及记基础知识](./react篇/react源码涉及基础知识.md) -->
+
+- [reconciler运作流程](./react篇/reconciler运作流程.md)
+
+- [fiber树构造（基础准备）](./react篇/Fiber树构造(基础准备).md)
+
+- [fiber树构造（初次创建）](./react篇/Fiber树构造(初次创建).md)
+
+- [fiber树构造（对比更新）](./react篇/Fiber树构造(对比更新).md)
