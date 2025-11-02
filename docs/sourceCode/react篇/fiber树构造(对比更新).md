@@ -341,7 +341,7 @@ function renderRootSync(root: FiberRoot, lanes: Lanes) {
 
 
 ## 循环构造workLoopSync
-在初次构造时，整个流程事一个深度优先遍历，其中有2个重要的变量```workInProgress```和```current```(双缓冲技术)
+在初次构造时，整个流程事一个<strong>深度优先遍历</strong>，其中有2个重要的变量```workInProgress```和```current```(双缓冲技术)
 
 - workInProgress和current都视为指针
 - workInProgress指向当前正在构造的fiber节点
@@ -350,6 +350,9 @@ function renderRootSync(root: FiberRoot, lanes: Lanes) {
 在深度优先遍历中，每个fiber节点会经历2个阶段：
 1. 探寻阶段```beginWork```
 2. 回溯阶段```completeWork```
+
+这两个阶段共同完成了每个fiber节点的创建（或者更新）所有的fiber节点构成了fiber树
+
 
 ```js
 // The work loop is an extremely hot path. Tell Closure not to inline it.
@@ -474,9 +477,16 @@ function beginWork(
   // the update queue. However, there's an exception: SimpleMemoComponent
   // sometimes bails out later in the begin phase. This indicates that we should
   // move this assignment out of the common path and into each branch.
+  /**
+   * 余下逻辑与初次创建公用
+   * 设置workInProgress优先级为noLanes（最高优先级）
+   */
   workInProgress.lanes = NoLanes;
 
   switch (workInProgress.tag) {
+    /**
+     * 根据workInProgress节点的类型，用不同方法派生出子节点
+     */
     case LazyComponent: {
       const elementType = workInProgress.elementType;
       return mountLazyComponent(
@@ -666,24 +676,226 @@ function beginWork(
   );
 }
 ```
+在beginWork阶段，根据workInProgress节点的类型, 用不同的方法派生出子节点，即updatexxx
+
+
+## bailout
+与初次创建不同，在对比更新过程中，如果是老节点，那么current!==null，需要进行对比，然后决定是否复用老节点及其子树（即bailout逻辑）
+
 ```js
-function attemptEarlyBailoutIfNoScheduledUpdate(
-  current: Fiber,
+function bailoutOnAlreadyFinishedWork(
+  current: Fiber | null,
   workInProgress: Fiber,
   renderLanes: Lanes,
-) {
-  // This fiber does not have any pending work. Bailout without entering
-  // the begin phase. There's still some bookkeeping we that needs to be done
-  // in this optimized path, mostly pushing stuff onto the stack.
-  switch (workInProgress.tag) {
-  //  省略
+): Fiber | null {
+  if (current !== null) {
+    // Reuse previous dependencies
+    workInProgress.dependencies = current.dependencies;
   }
-  return bailoutOnAlreadyFinishedWork(current, workInProgress, renderLanes);
+
+  if (enableProfilerTimer) {
+    // Don't update "base" render times for bailouts.
+    stopProfilerTimerIfRunning(workInProgress);
+  }
+
+  markSkippedUpdateLanes(workInProgress.lanes);
+
+/**
+ * 渲染优先级不包括workInProgress.childLanes,表明子节点也无需更新
+ */
+  // Check if the children have any pending work.
+  if (!includesSomeLane(renderLanes, workInProgress.childLanes)) {
+    // The children don't have any work either. We can skip them.
+    // TODO: Once we add back resuming, we should check if the children are
+    // a work-in-progress set. If so, we need to transfer their effects.
+
+    if (current !== null) {
+      // Before bailing out, check if there are any context changes in
+      // the children.
+      lazilyPropagateParentContextChanges(current, workInProgress, renderLanes);
+      // 子节点也无需更新. 返回null, 直接进入回溯阶段.
+      if (!includesSomeLane(renderLanes, workInProgress.childLanes)) {
+        return null;
+      }
+    } else {
+      return null;
+    }
+  }
+
+  // This fiber doesn't have work, but its subtree does. Clone the child
+  // fibers and continue.
+  cloneChildFibers(current, workInProgress);
+  return workInProgress.child;
 }
 ```
 
-在```classComponentUpdater```中通过
+# 回溯阶段completeWork
+在初次创建和对比更新一致，都是处理beginWork阶段已经创建出来的fiber节点，最后创建（更新）对象，并上移副作用队列
+
 ```js
+function completeWork(
+  current: Fiber | null,
+  workInProgress: Fiber,
+  renderLanes: Lanes,
+): Fiber | null {
+  const newProps = workInProgress.pendingProps;
+  // Note: This intentionally doesn't check if we're hydrating because comparing
+  // to the current tree provider fiber is just as fast and less error-prone.
+  // Ideally we would have a special version of the work loop only
+  // for hydration.
+  popTreeContext(workInProgress);
+  switch (workInProgress.tag) {
+     case HostComponent: {
+      // 非文本节点
+      popHostContext(workInProgress);
+      const type = workInProgress.type;
+      // 对比更新
+      if (current !== null && workInProgress.stateNode != null) {
+        updateHostComponent(
+          current,
+          workInProgress,
+          type,
+          newProps,
+          renderLanes,
+        );
+      } else {
+        // ...
+      }
+      bubbleProperties(workInProgress);
+      if (enableViewTransition) {
+        // Host Components act as their own View Transitions which doesn't run enter/exit animations.
+        // We clear any ViewTransitionStatic flag bubbled from inner View Transitions.
+        workInProgress.subtreeFlags &= ~ViewTransitionStatic;
+      }
+
+      // This must come at the very end of the complete phase, because it might
+      // throw to suspend, and if the resource immediately loads, the work loop
+      // will resume rendering as if the work-in-progress completed. So it must
+      // fully complete.
+      preloadInstanceAndSuspendIfNeeded(
+        workInProgress,
+        workInProgress.type,
+        current === null ? null : current.memoizedProps,
+        workInProgress.pendingProps,
+        renderLanes,
+      );
+      return null;
+    }
+
+    case HostText: {
+      // 文本节点
+      const newText = newProps;
+      if (current && workInProgress.stateNode != null) {
+        const oldText = current.memoizedProps;
+        // 处理改动
+        updateHostText(current, workInProgress, oldText, newText);
+      } else {
+        // ...省略无关代码
+      }
+      bubbleProperties(workInProgress);
+      return null;
+    }
+  }
+}
+```
+可以看到在更新过程中, 如果 DOM 属性有变化, 不会再次新建 DOM 对象, 而是设置```fiber.flags |= Update```(在markUpdate过程中), 等待commit阶段处理
+```js
+function updateHostComponent(
+  current: Fiber,
+  workInProgress: Fiber,
+  type: Type,
+  newProps: Props,
+  renderLanes: Lanes,
+) {
+  if (supportsMutation) {
+    // If we have an alternate, that means this is an update and we need to
+    // schedule a side-effect to do the updates.
+    const oldProps = current.memoizedProps;
+    if (oldProps === newProps) {
+      // In mutation mode, this is sufficient for a bailout because
+      // we won't touch this node even if children changed.
+      return;
+    }
+
+    markUpdate(workInProgress);
+  } else if (supportsPersistence) {
+    const currentInstance = current.stateNode;
+    const oldProps = current.memoizedProps;
+    // If there are no effects associated with this node, then none of our children had any updates.
+    // This guarantees that we can reuse all of them.
+    const requiresClone = doesRequireClone(current, workInProgress);
+    if (!requiresClone && oldProps === newProps) {
+      // No changes, just reuse the existing instance.
+      // Note that this might release a previous clone.
+      workInProgress.stateNode = currentInstance;
+      return;
+    }
+    const currentHostContext = getHostContext();
+
+    let newChildSet = null;
+    let hasOffscreenComponentChild = false;
+    if (requiresClone && passChildrenWhenCloningPersistedNodes) {
+      markCloned(workInProgress);
+      newChildSet = createContainerChildSet();
+      // If children might have changed, we have to add them all to the set.
+      hasOffscreenComponentChild = appendAllChildrenToContainer(
+        newChildSet,
+        workInProgress,
+        /* needsVisibilityToggle */ false,
+        /* isHidden */ false,
+      );
+    }
+
+    const newInstance = cloneInstance(
+      currentInstance,
+      type,
+      oldProps,
+      newProps,
+      !requiresClone,
+      !hasOffscreenComponentChild ? newChildSet : undefined,
+    );
+    if (newInstance === currentInstance) {
+      // No changes, just reuse the existing instance.
+      // Note that this might release a previous clone.
+      workInProgress.stateNode = currentInstance;
+      return;
+    } else {
+      markCloned(workInProgress);
+    }
+
+    // Certain renderers require commit-time effects for initial mount.
+    // (eg DOM renderer supports auto-focus for certain elements).
+    // Make sure such renderers get scheduled for later work.
+    if (
+      finalizeInitialChildren(newInstance, type, newProps, currentHostContext)
+    ) {
+      markUpdate(workInProgress);
+    }
+    workInProgress.stateNode = newInstance;
+    if (!requiresClone) {
+      if (!enablePersistedModeClonedFlag) {
+        // If there are no other effects in this tree, we need to flag this node as having one.
+        // Even though we're not going to use it for anything.
+        // Otherwise parents won't know that there are new children to propagate upwards.
+        markUpdate(workInProgress);
+      }
+    } else if (
+      !passChildrenWhenCloningPersistedNodes ||
+      hasOffscreenComponentChild
+    ) {
+      // If children have changed, we have to add them all to the set.
+      appendAllChildren(
+        newInstance,
+        workInProgress,
+        /* needsVisibilityToggle */ false,
+        /* isHidden */ false,
+      );
+    }
+  }
+}
+```
+
+```classComponentUpdater```
 /**
  * enqueueUpdate主要流程
 获取 updateQueue
