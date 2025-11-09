@@ -286,10 +286,253 @@ markRootFinished 是 React 内部用于管理调度和任务优先级的函数�
 React 支持多优先级并发调度（Concurrent Mode），同一个 root 可能有多个不同优先级的任务（lanes）。每次 commit 后，需要把已经完成的 lanes 标记为“已完成”，剩下的继续等待下次调度。这样可以避免重复渲染、保证高优先级任务优先完成。
 
 
+### commitBeforeMutationEffects
+```commitBeforeMutationEffects```是React Fiber 渲染流程中 commit 阶段的第一步，遍历 Fiber 树，执行所有“Before Mutation”类型的副作用。递归遍历所有有 BeforeMutation 副作用的 Fiber 节点。对每个节点调用 ```commitBeforeMutationEffectsOnFiber```，根据 tag 和 flags 执行不同的前置副作用,主要典型场景：
+
+1. 调用 class 组件的 getSnapshotBeforeUpdate
+2. 处理 useEffectEvent 的 ref impl 切换
+3. 处理 ViewTransition、Suspense 等相关的前置逻辑
+4. 处理即将被删除节点的相关副作用
+```js
+export function commitBeforeMutationEffects(
+  root: FiberRoot,
+  firstChild: Fiber,
+  committedLanes: Lanes,
+): void {
+  focusedInstanceHandle = prepareForCommit(root.containerInfo);
+  shouldFireAfterActiveInstanceBlur = false;
+
+  const isViewTransitionEligible =
+    enableViewTransition &&
+    includesOnlyViewTransitionEligibleLanes(committedLanes);
+
+  nextEffect = firstChild;
+  commitBeforeMutationEffects_begin(isViewTransitionEligible);
+
+  // We no longer need to track the active instance fiber
+  focusedInstanceHandle = null;
+  // We've found any matched pairs and can now reset.
+  resetAppearingViewTransitions();
+}
+
+function commitBeforeMutationEffects_begin(isViewTransitionEligible: boolean) {
+  // If this commit is eligible for a View Transition we look into all mutated subtrees.
+  // TODO: We could optimize this by marking these with the Snapshot subtree flag in the render phase.
+  const subtreeMask = isViewTransitionEligible
+    ? BeforeAndAfterMutationTransitionMask
+    : BeforeMutationMask;
+  while (nextEffect !== null) {
+    const fiber = nextEffect;
+
+    // This phase is only used for beforeActiveInstanceBlur.
+    // Let's skip the whole loop if it's off.
+    if (enableCreateEventHandleAPI || isViewTransitionEligible) {
+      // TODO: Should wrap this in flags check, too, as optimization
+      const deletions = fiber.deletions;
+      if (deletions !== null) {
+        for (let i = 0; i < deletions.length; i++) {
+          const deletion = deletions[i];
+          commitBeforeMutationEffectsDeletion(
+            deletion,
+            isViewTransitionEligible,
+          );
+        }
+      }
+    }
+
+    if (
+      enableViewTransition &&
+      fiber.alternate === null &&
+      (fiber.flags & Placement) !== NoFlags
+    ) {
+      // Skip before mutation effects of the children because we don't want
+      // to trigger updates of any nested view transitions and we shouldn't
+      // have any other before mutation effects since snapshot effects are
+      // only applied to updates. TODO: Model this using only flags.
+      if (isViewTransitionEligible) {
+        trackEnterViewTransitions(fiber);
+      }
+      commitBeforeMutationEffects_complete(isViewTransitionEligible);
+      continue;
+    }
+
+    // TODO: This should really unify with the switch in commitBeforeMutationEffectsOnFiber recursively.
+    if (enableViewTransition && fiber.tag === OffscreenComponent) {
+      const isModernRoot =
+        disableLegacyMode || (fiber.mode & ConcurrentMode) !== NoMode;
+      if (isModernRoot) {
+        const current = fiber.alternate;
+        const isHidden = fiber.memoizedState !== null;
+        if (isHidden) {
+          if (
+            current !== null &&
+            current.memoizedState === null &&
+            isViewTransitionEligible
+          ) {
+            // Was previously mounted as visible but is now hidden.
+            commitExitViewTransitions(current);
+          }
+          // Skip before mutation effects of the children because they're hidden.
+          commitBeforeMutationEffects_complete(isViewTransitionEligible);
+          continue;
+        } else if (current !== null && current.memoizedState !== null) {
+          // Was previously mounted as hidden but is now visible.
+          // Skip before mutation effects of the children because we don't want
+          // to trigger updates of any nested view transitions and we shouldn't
+          // have any other before mutation effects since snapshot effects are
+          // only applied to updates. TODO: Model this using only flags.
+          if (isViewTransitionEligible) {
+            trackEnterViewTransitions(fiber);
+          }
+          commitBeforeMutationEffects_complete(isViewTransitionEligible);
+          continue;
+        }
+      }
+    }
+
+    const child = fiber.child;
+    if ((fiber.subtreeFlags & subtreeMask) !== NoFlags && child !== null) {
+      child.return = fiber;
+      nextEffect = child;
+    } else {
+      if (isViewTransitionEligible) {
+        // We are inside an updated subtree. Any mutations that affected the
+        // parent HostInstance's layout or set of children (such as reorders)
+        // might have also affected the positioning or size of the inner
+        // ViewTransitions. Therefore we need to find them inside.
+        commitNestedViewTransitions(fiber);
+      }
+      commitBeforeMutationEffects_complete(isViewTransitionEligible);
+    }
+  }
+}
+
+function commitBeforeMutationEffects_complete(
+  isViewTransitionEligible: boolean,
+) {
+  while (nextEffect !== null) {
+    const fiber = nextEffect;
+    commitBeforeMutationEffectsOnFiber(fiber, isViewTransitionEligible);
+
+    const sibling = fiber.sibling;
+    if (sibling !== null) {
+      sibling.return = fiber.return;
+      nextEffect = sibling;
+      return;
+    }
+
+    nextEffect = fiber.return;
+  }
+}
+
+function commitBeforeMutationEffectsOnFiber(
+  finishedWork: Fiber,
+  isViewTransitionEligible: boolean,
+) {
+  const current = finishedWork.alternate;
+  const flags = finishedWork.flags;
+
+  if (enableCreateEventHandleAPI) {
+    if (!shouldFireAfterActiveInstanceBlur && focusedInstanceHandle !== null) {
+      // Check to see if the focused element was inside of a hidden (Suspense) subtree.
+      // TODO: Move this out of the hot path using a dedicated effect tag.
+      // TODO: This should consider Offscreen in general and not just SuspenseComponent.
+      if (
+        finishedWork.tag === SuspenseComponent &&
+        isSuspenseBoundaryBeingHidden(current, finishedWork) &&
+        // $FlowFixMe[incompatible-call] found when upgrading Flow
+        doesFiberContain(finishedWork, focusedInstanceHandle)
+      ) {
+        shouldFireAfterActiveInstanceBlur = true;
+        beforeActiveInstanceBlur(finishedWork);
+      }
+    }
+  }
+
+  switch (finishedWork.tag) {
+    case FunctionComponent: {
+      if (enableUseEffectEventHook) {
+        if ((flags & Update) !== NoFlags) {
+          const updateQueue: FunctionComponentUpdateQueue | null =
+            (finishedWork.updateQueue: any);
+          const eventPayloads =
+            updateQueue !== null ? updateQueue.events : null;
+          if (eventPayloads !== null) {
+            for (let ii = 0; ii < eventPayloads.length; ii++) {
+              const {ref, nextImpl} = eventPayloads[ii];
+              ref.impl = nextImpl;
+            }
+          }
+        }
+      }
+      break;
+    }
+    case ForwardRef:
+    case SimpleMemoComponent: {
+      break;
+    }
+    case ClassComponent: {
+      if ((flags & Snapshot) !== NoFlags) {
+        if (current !== null) {
+          commitClassSnapshot(finishedWork, current);
+        }
+      }
+      break;
+    }
+    case HostRoot: {
+      if ((flags & Snapshot) !== NoFlags) {
+        if (supportsMutation) {
+          const root = finishedWork.stateNode;
+          clearContainer(root.containerInfo);
+        }
+      }
+      break;
+    }
+    case HostComponent:
+    case HostHoistable:
+    case HostSingleton:
+    case HostText:
+    case HostPortal:
+    case IncompleteClassComponent:
+      // Nothing to do for these component types
+      break;
+    case ViewTransitionComponent:
+      if (enableViewTransition) {
+        if (isViewTransitionEligible) {
+          if (current === null) {
+            // This is a new mount. We should have handled this as part of the
+            // Placement effect or it is deeper inside a entering transition.
+          } else {
+            // Something may have mutated within this subtree. This might need to cause
+            // a cross-fade of this parent. We first assign old names to the
+            // previous tree in the before mutation phase in case we need to.
+            // TODO: This walks the tree that we might continue walking anyway.
+            // We should just stash the parent ViewTransitionComponent and continue
+            // walking the tree until we find HostComponent but to do that we need
+            // to use a stack which requires refactoring this phase.
+            commitBeforeUpdateViewTransition(current, finishedWork);
+          }
+        }
+        break;
+      }
+    // Fallthrough
+    default: {
+      if ((flags & Snapshot) !== NoFlags) {
+        throw new Error(
+          'This unit of work tag should not have side-effects. This error is ' +
+            'likely caused by a bug in React. Please file an issue.',
+        );
+      }
+    }
+  }
+}
+```
+
 ### flushMutationEffects
 ```js
 
 function flushMutationEffects(): void {
+    // 只有当 pendingEffectsStatus === PENDING_MUTATION_PHASE 时才会执行，防止重复调用。
   if (pendingEffectsStatus !== PENDING_MUTATION_PHASE) {
     return;
   }
@@ -339,28 +582,271 @@ function flushMutationEffects(): void {
 ```flushMutationEffects```在 React commit 阶段的“Mutation Phase”中，遍历 Fiber 树，执行所有需要“变更 DOM”或“副作用”的操作。
 
 
-详细流程
-状态检查
+#### 详细流程
+
+##### 状态检查
 只有当 pendingEffectsStatus === PENDING_MUTATION_PHASE 时才会执行，防止重复调用。
 
-准备变量
+##### 准备变量
 
-获取当前需要处理的 root、finishedWork（即将成为 current 的 Fiber 树）、lanes。
-检查本次 commit 是否有 Mutation 类型的副作用（如 Placement、Update、Deletion 等）。
-执行 Mutation 副作用
+1. 获取当前需要处理的 root、finishedWork（即将成为 current 的 Fiber 树）、lanes。
+
+2. 检查本次 commit 是否有 Mutation 类型的副作用（如 Placement、Update、Deletion 等）。
+
+##### 执行 Mutation 副作用
 
 如果有 Mutation 副作用（MutationMask），则：
-切换到 CommitContext，提升优先级到 DiscreteEventPriority。
-调用 commitMutationEffects(root, finishedWork, lanes)，遍历 Fiber 树，执行所有 Mutation 副作用，如：
-插入/删除/移动 DOM 节点
-调用 class 组件的 componentWillUnmount
-处理 ref 的 attach/detach
-触发 useInsertionEffect
-处理事件相关的副作用（如 afterActiveInstanceBlur）。
-调用 resetAfterCommit，让宿主环境（如 DOM）做一些收尾工作。
-切换 Fiber 树
+
+1. 切换到 CommitContext，提升优先级到 DiscreteEventPriority。
+   
+2. 调用 commitMutationEffects(root, finishedWork, lanes)，遍历 Fiber 树，执行所有 Mutation 副作用，如：
+    
+    - 插入/删除/移动 DOM 节点
+    - 调用 class 组件的 componentWillUnmount
+    - 处理 ref 的 attach/detach
+    - 触发 useInsertionEffect
+
+3. 处理事件相关的副作用（如 afterActiveInstanceBlur）。
+4. 调用 resetAfterCommit，让宿主环境（如 DOM）做一些收尾工作。
+
+##### 切换 Fiber 树
 
 将 root.current 指向刚刚 commit 完成的 finishedWork，即“切换当前树”。
 进入下一个阶段
 
 将 pendingEffectsStatus 设为 PENDING_LAYOUT_PHASE，准备进入 Layout 副作用阶段。
+
+#### commitMutationEffectsOnFiber
+
+```commitMutationEffectsOnFiber```是 ```React Fiber commit``` 阶段“Mutation Phase”最核心的递归函数之一。它的作用是遍历 Fiber 树，对每个 Fiber 节点执行需要的“变更副作用”，比如插入、更新、删除 DOM 节点，解绑 ref，调用卸载生命周期等。该函数每个case中都会先调用```recursivelyTraverseMutationEffects```，主要作用为确保所有子节点的副作用先于父节点执行（自底向上）。
+
+##### 主要流程和作用
+1. 递归遍历
+
+首先递归遍历子节点（recursivelyTraverseMutationEffects），确保所有子节点的副作用先于父节点执行（自底向上）。
+
+2. 处理自身副作用
+根据 Fiber 的类型（tag），对当前节点执行不同的副作用处理，包括：
+    - FunctionComponent / ClassComponent / HostComponent / HostText 等：
+        - 递归处理子节点
+        - 处理自身的副作用（如 Placement、Update、Ref、ContentReset、FormReset 等）
+        - 处理 hooks 的卸载和挂载（如 useEffect、useLayoutEffect 的 unmount/mount）
+        - 处理 ref 的解绑和绑定
+        - 处理 DOM 节点的插入、更新、删除
+        - 处理 class 组件的 componentWillUnmount
+        - 处理 Suspense、Offscreen、Portal、Profiler、ViewTransition 等特殊类型的副作用
+        - HostRoot：处理根节点相关的副作用，比如 hydration、持久化等。
+        - HostPortal：处理 portal 子树的副作用。
+        - Suspense/Offscreen：处理隐藏/显示、重置、重连等逻辑。
+        - ViewTransitionComponent：处理视图过渡相关的动画和标记。
+
+3. 处理删除（deletion）
+如果当前节点有删除的子节点（deletions），会递归调用 commitDeletionEffects，对被删除的 Fiber 及其子树做彻底的副作用清理，包括：
+    
+    - 卸载副作用
+    
+    - 解绑 ref
+    - 移除 DOM 节点
+    - 调用卸载生命周期
+    - 断开 Fiber 链表，帮助 GC
+4. 性能统计
+如果开启了 Profiler，会记录副作用的耗时、错误等信息，便于性能分析和调试。
+
+##### 🌰 以其中```HostComponent```( 即原生 DOM 节点，比如 \<div\>、\<span\> 等 )case类型为例
+
+```js
+ case HostComponent: {
+        // 递归处理子节点，先递归处理所有子 Fiber，确保子树的副作用先于父节点执行。
+      recursivelyTraverseMutationEffects(root, finishedWork, lanes);
+    //  处理自身的副作用，将新建的 DOM 节点插入到正确的父节点和位置中，这就是“挂载”或“插入”节点的过程。
+      commitReconciliationEffects(finishedWork, lanes);
+
+    //  Ref 的解绑，如果有 Ref 变更，先解绑旧的 Ref。
+      if (flags & Ref) {
+        if (!offscreenSubtreeWasHidden && current !== null) {
+          safelyDetachRef(current, current.return);
+        }
+      }
+
+    //   处理 DOM 相关的变更
+      if (supportsMutation) {
+        // TODO: ContentReset gets cleared by the children during the commit
+        // phase. This is a refactor hazard because it means we must read
+        // flags the flags after `commitReconciliationEffects` has already run;
+        // the order matters. We should refactor so that ContentReset does not
+        // rely on mutating the flag during commit. Like by setting a flag
+        // during the render phase instead.
+        if (finishedWork.flags & ContentReset) {
+            //ContentReset 重置文本内容（如 <input> 的 value）。
+          commitHostResetTextContent(finishedWork);
+        }
+
+        if (flags & Update) {
+            // Update：调用 commitHostUpdate，对比新旧 props，更新 DOM 属性、事件、样式等。
+          const instance: Instance = finishedWork.stateNode;
+          if (instance != null) {
+            // Commit the work prepared earlier.
+            // For hydration we reuse the update path but we treat the oldProps
+            // as the newProps. The updatePayload will contain the real change in
+            // this case.
+            const newProps = finishedWork.memoizedProps;
+            const oldProps =
+              current !== null ? current.memoizedProps : newProps;
+            commitHostUpdate(finishedWork, newProps, oldProps);
+          }
+        }
+
+        if (flags & FormReset) {
+            // FormReset：如果是 <form>，记录需要重置，稍后统一处理。
+          needsFormReset = true;
+          if (__DEV__) {
+            if (finishedWork.type !== 'form') {
+              // Paranoid coding. In case we accidentally start using the
+              // FormReset bit for something else.
+              console.error(
+                'Unexpected host component type. Expected a form. This is a ' +
+                  'bug in React.',
+              );
+            }
+          }
+        }
+      } else {
+        if (enableEagerAlternateStateNodeCleanup) {
+          if (supportsPersistence) {
+            if (finishedWork.alternate !== null) {
+              // `finishedWork.alternate.stateNode` is pointing to a stale shadow
+              // node at this point, retaining it and its subtree. To reclaim
+              // memory, point `alternate.stateNode` to new shadow node. This
+              // prevents shadow node from staying in memory longer than it
+              // needs to. The correct behaviour of this is checked by test in
+              // React Native: ShadowNodeReferenceCounter-itest.js#L150
+              finishedWork.alternate.stateNode = finishedWork.stateNode;
+            }
+          }
+        }
+      }
+      break;
+    }
+```
+
+###### ref解绑
+<strong>解绑旧的 ref：</strong>
+
+在 commit 阶段的 Mutation Phase，React 会先判断当前 Fiber（如 HostComponent）是否有 Ref 相关的变更（flags & Ref），如果有，并且不是在隐藏的 Offscreen 子树中，就会调用 safelyDetachRef(current, current.return)，解绑旧树（current，也就是上一次渲染的 Fiber 树）上的 ref。
+
+<strong>绑定新的 ref：</strong>
+
+绑定新 ref 的操作不是在 Mutation Phase，而是在后续的 Layout Phase 完成的。
+具体来说，在 commitLayoutEffectOnFiber 里，如果有 Ref 相关的变更，会调用 safelyAttachRef(finishedWork, finishedWork.return)，把 ref 绑定到新树（workInProgress，也就是本次渲染完成的 Fiber 树）上。
+
+<strong>新旧树的关系：</strong>
+
+current 指的是旧的 Fiber（上一次 commit 后的树）。
+finishedWork 指的是新 Fiber（本次 commit 后要成为 current 的树）。
+流程总结：
+
+Mutation Phase：解绑旧树（current）上的 ref。
+Layout Phase：绑定新树（finishedWork）上的 ref。
+这样保证了 ref 总是指向最新的 DOM 或组件实例。
+
+### dom变更后 commitLayoutEffects
+```js
+export function commitLayoutEffects(
+  finishedWork: Fiber,
+  root: FiberRoot,
+  committedLanes: Lanes,
+): void {
+  inProgressLanes = committedLanes;
+  inProgressRoot = root;
+
+  resetComponentEffectTimers();
+
+  const current = finishedWork.alternate;
+  commitLayoutEffectOnFiber(root, current, finishedWork, committedLanes);
+
+  inProgressLanes = null;
+  inProgressRoot = null;
+}
+```
+```commitLayoutEffectOnFiber```,负责在 commit 的 Layout 阶段递归遍历 Fiber 树，执行所有布局相关的副作用。
+典型副作用包括：useLayoutEffect、componentDidMount、componentDidUpdate、ref 绑定、自动聚焦等。
+只有在 DOM 已经变更后才会执行，保证副作用拿到的 DOM 是最新的。
+
+以FunctionComponent🌰
+
+```js
+ case FunctionComponent:
+    case ForwardRef:
+    case SimpleMemoComponent: {
+    // 首先调用 recursivelyTraverseLayoutEffects，递归处理所有子 Fiber 节点，确保子树的 layout 副作用先于父节点执行。
+      recursivelyTraverseLayoutEffects(
+        finishedRoot,
+        finishedWork,
+        committedLanes,
+      );
+      if (flags & Update) {
+        commitHookLayoutEffects(finishedWork, HookLayout | HookHasEffect);
+      }
+      break;
+    }
+```
+典型场景你在函数组件里写的``` useLayoutEffect(() => { ... }, [...])```，就是在这里被同步执行的。
+这保证了 effect 执行时，DOM 已经是最新状态。
+
+
+#### commitHookLayoutEffects（主要实现在commitHookEffectListMount）
+本质就是遍历并执行 function 组件的 hooks 副作用的 create 函数，并把返回的清理函数保存下来，供卸载时调用。举个🌰
+```js
+useLayoutEffect(() => {
+  // 这里的代码会在 commitHookEffectListMount 里被执行
+  // 可以安全操作 DOM
+  return () => { /* 清理逻辑 */ }
+}, []);
+```
+同理useEffect也会最终在commitHookEffectListMount,只是不同的hook执行的时机不同
+```js
+export function commitHookEffectListMount(
+  flags: HookFlags,
+  finishedWork: Fiber,
+) {
+  try {
+    // 从 finishedWork.updateQueue 里拿到 effect 环形链表（lastEffect）
+    const updateQueue: FunctionComponentUpdateQueue | null =
+      (finishedWork.updateQueue: any);
+    const lastEffect = updateQueue !== null ? updateQueue.lastEffect : null;
+    // 如果有 effect，就遍历。以环形链表的方式遍历每一个 effect。
+    if (lastEffect !== null) {
+      const firstEffect = lastEffect.next;
+      let effect = firstEffect;
+      do {
+        // 只有 effect.tag 包含传入的 flags（如 HookLayout、HookInsertion、HookPassive）才会执行。
+        if ((effect.tag & flags) === flags) {
+
+          // Mount
+          let destroy;
+         /**
+          * 省略无关代码
+          */
+         /**
+          * 对于 useLayoutEffect、useInsertionEffect、useEffect，会调用 effect 的 create 方法（即你写的副作用函数）。
+返回值（destroy）会被保存到 inst.destroy，用于卸载时调用。
+          */
+            const create = effect.create;
+            const inst = effect.inst;
+            destroy = create();
+            inst.destroy = destroy;
+          
+        }
+        effect = effect.next;
+      } while (effect !== firstEffect);
+    }
+  } catch (error) {
+    captureCommitPhaseError(finishedWork, finishedWork.return, error);
+  }
+}
+```
+
+### 清理善后flushSpawnedWork
+
+该函数的主要功能为在 React commit 阶段的最后，处理“衍生（spawned）出来的工作”，确保所有特殊的副作用流程都被正确执行和收尾。
+
