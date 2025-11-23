@@ -157,8 +157,9 @@ export function renderWithHooks<Props, SecondArg>(
   secondArg: SecondArg,
   nextRenderLanes: Lanes,
 ): any {
-  renderLanes = nextRenderLanes;
-  currentlyRenderingFiber = workInProgress;
+  // --------------- 1. 设置全局变量 -------------------
+  renderLanes = nextRenderLanes; //// 当前渲染优先级
+  currentlyRenderingFiber = workInProgress;// 当前fiber节点, 也就是function组件对应的fiber节点
 
   if (__DEV__) {
     hookTypesDev =
@@ -172,7 +173,7 @@ export function renderWithHooks<Props, SecondArg>(
 
     warnIfAsyncClientComponent(Component);
   }
-
+// // 清除当前fiber的遗留状态
   workInProgress.memoizedState = null;
   workInProgress.updateQueue = null;
   workInProgress.lanes = NoLanes;
@@ -207,6 +208,8 @@ export function renderWithHooks<Props, SecondArg>(
       ReactSharedInternals.H = HooksDispatcherOnMountInDEV;
     }
   } else {
+    // --------------- 2. 调用function,生成子级ReactElement对象 -------------------
+  // 指定dispatcher, 区分mount和update
     ReactSharedInternals.H =
       current === null || current.memoizedState === null
         ? HooksDispatcherOnMount
@@ -280,3 +283,81 @@ export function renderWithHooks<Props, SecondArg>(
   return children;
 }
 ```
+
+## 调用Function
+### Hooks构造
+在函数中如果使用了hook api，就会创建一个与之对应的Hook对象，以下面这个例子解析过程
+```js
+import React, { useState, useEffect } from 'react';
+export default function App() {
+  // 1. useState
+  const [a, setA] = useState(1);
+  // 2. useEffect
+  useEffect(() => {
+    console.log(`effect 1 created`);
+  });
+  // 3. useState
+  const [b] = useState(2);
+  // 4. useEffect
+  useEffect(() => {
+    console.log(`effect 2 created`);
+  });
+  return (
+    <>
+      <button onClick={() => setA(a + 1)}>{a}</button>
+      <button>{b}</button>
+    </>
+  );
+}
+```
+
+初次渲染时，逻辑执行到```performUnitOfWork->beginWork->updateFunctionComponent->renderWithHooks```前，内存结构如下
+
+![alt text](./img/Hook构造Fiber树-构造进行中.png)
+
+当执行```renderWithHooks```时，开始调用function，上面例子中，依次调用```useState,useEffect,useState,useEffect```，useState, useEffect在fiber初次构造时分别对应```mountState和mountEffect->mountEffectImpl```，内部都会通过```mountWorkInProgressHook```创建一个hook,并挂载到了```fiber.memoizedState上，多个hook以链表结构保存
+
+```js
+function mountEffectImpl(
+  fiberFlags: Flags,
+  hookFlags: HookFlags,
+  create: () => (() => void) | void,
+  deps: Array<mixed> | void | null,
+): void {
+  const hook = mountWorkInProgressHook();
+  const nextDeps = deps === undefined ? null : deps;
+  currentlyRenderingFiber.flags |= fiberFlags;
+  hook.memoizedState = pushSimpleEffect(
+    HookHasEffect | hookFlags,
+    createEffectInstance(),
+    create,
+    nextDeps,
+  );
+}
+```
+
+```js
+function mountWorkInProgressHook(): Hook {
+  const hook: Hook = {
+    memoizedState: null,
+
+    baseState: null,
+    baseQueue: null,
+    queue: null,
+
+    next: null,
+  };
+
+  if (workInProgressHook === null) {
+    // This is the first hook in the list
+    currentlyRenderingFiber.memoizedState = workInProgressHook = hook;
+  } else {
+    // Append to the end of the list
+    workInProgressHook = workInProgressHook.next = hook;
+  }
+  return workInProgressHook;
+}
+```
+
+![alt text](./img/hook创建后挂载.png)
+![alt text](./img/hook链表.png)

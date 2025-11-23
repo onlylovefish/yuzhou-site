@@ -896,6 +896,7 @@ function updateHostComponent(
 ```
 
 ```classComponentUpdater```
+```js
 /**
  * enqueueUpdate主要流程
 获取 updateQueue

@@ -499,6 +499,7 @@ function commitBeforeMutationEffectsOnFiber(
     case ViewTransitionComponent:
       if (enableViewTransition) {
         if (isViewTransitionEligible) {
+          // 初次渲染 调用 componentDidMount
           if (current === null) {
             // This is a new mount. We should have handled this as part of the
             // Placement effect or it is deeper inside a entering transition.
