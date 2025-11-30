@@ -335,7 +335,8 @@ function mountEffectImpl(
   );
 }
 ```
-
+### 链表存储
+创建的hook挂载在fiber.memoizedState上，多个hook以链表结构保存
 ```js
 function mountWorkInProgressHook(): Hook {
   const hook: Hook = {
@@ -358,6 +359,116 @@ function mountWorkInProgressHook(): Hook {
   return workInProgressHook;
 }
 ```
-
+无论是状态hook还是副作用hook都会按照调用顺序存储在fiber.memoizedState链表中
 ![alt text](./img/hook创建后挂载.png)
 ![alt text](./img/hook链表.png)
+
+### 顺序克隆
+
+fiber树构造（对比更新）阶段，执行```updateFunctionComponent->renderWithHooks```时再次调用function，调用function的内存结构如下
+![alt text](./img/fiber树内存结构（构造循环之前）.png)
+
+在```renderWithHooks```函数中已经设置了```workInProgress.memoizedState = null;```等待调用function时重新设置
+
+接下来调用function，同样依次调用```useState, useEffect, useState, useEffect```，而```useState, useEffect```在fiber对比更新时分别对应```updateState->updateReducer和updateEffect->updateEffectImpl```
+
+```js
+// ----- 状态Hook --------
+function updateReducer<S, I, A>(
+  reducer: (S, A) => S,
+  initialArg: I,
+  init?: (I) => S,
+): [S, Dispatch<A>] {
+  const hook = updateWorkInProgressHook();
+  // ...省略部分本节不讨论
+}
+
+// ----- 副作用Hook --------
+function updateEffectImpl(fiberFlags, hookFlags, create, deps): void {
+  const hook = updateWorkInProgressHook();
+  // ...省略部分本节不讨论
+}
+```
+
+无论useState，useEffect，内部调用updateWorkInProgressHook获取一个hook，updateWorkInProgressHook函数逻辑简单: 目的是为了让currentHook和workInProgressHook两个指针同时向后移动.
+```js
+function updateWorkInProgressHook(): Hook {
+  // This function is used both for updates and for re-renders triggered by a
+  // render phase update. It assumes there is either a current hook we can
+  // clone, or a work-in-progress hook from a previous render pass that we can
+  // use as a base.
+  let nextCurrentHook: null | Hook;
+  if (currentHook === null) {
+    const current = currentlyRenderingFiber.alternate;
+    if (current !== null) {
+      nextCurrentHook = current.memoizedState;
+    } else {
+      nextCurrentHook = null;
+    }
+  } else {
+    nextCurrentHook = currentHook.next;
+  }
+
+  let nextWorkInProgressHook: null | Hook;
+  if (workInProgressHook === null) {
+    nextWorkInProgressHook = currentlyRenderingFiber.memoizedState;
+  } else {
+    nextWorkInProgressHook = workInProgressHook.next;
+  }
+
+  if (nextWorkInProgressHook !== null) {
+    // There's already a work-in-progress. Reuse it.
+    workInProgressHook = nextWorkInProgressHook;
+    nextWorkInProgressHook = workInProgressHook.next;
+
+    currentHook = nextCurrentHook;
+  } else {
+    // Clone from the current hook.
+
+    if (nextCurrentHook === null) {
+      const currentFiber = currentlyRenderingFiber.alternate;
+      if (currentFiber === null) {
+        // This is the initial render. This branch is reached when the component
+        // suspends, resumes, then renders an additional hook.
+        // Should never be reached because we should switch to the mount dispatcher first.
+        throw new Error(
+          'Update hook called on initial render. This is likely a bug in React. Please file an issue.',
+        );
+      } else {
+        // This is an update. We should always have a current hook.
+        throw new Error('Rendered more hooks than during the previous render.');
+      }
+    }
+
+    currentHook = nextCurrentHook;
+
+    const newHook: Hook = {
+      memoizedState: currentHook.memoizedState,
+
+      baseState: currentHook.baseState,
+      baseQueue: currentHook.baseQueue,
+      queue: currentHook.queue,
+
+      next: null,
+    };
+
+    if (workInProgressHook === null) {
+      // This is the first hook in the list.
+      currentlyRenderingFiber.memoizedState = workInProgressHook = newHook;
+    } else {
+      // Append to the end of the list.
+      workInProgressHook = workInProgressHook.next = newHook;
+    }
+  }
+  return workInProgressHook;
+}
+```
+
+1. 由于renderWithHooks函数设置了```workInProgress.memoizedState=null```,所以```workInProgressHook```初始值必然是null，只能从```currentHook```克隆
+2. 从```currentHook```克隆而来的```newHook.next=null```，所以```workInProgressHook```链表需要重建
+
+![alt text](./img/fiber树内存结构（构造进行中）.png)
+
+通过双缓冲技术，将current.memoizedState按照顺序克隆到了workInProgress.memoizedState中，经过克隆，内部属性(hook.memoizedState)无变动，所以状态也不会丢失
+
+![alt text](./img/fiber.memoizedState.png)
