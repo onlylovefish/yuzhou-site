@@ -472,19 +472,3 @@ function updateWorkInProgressHook(): Hook {
 通过双缓冲技术，将current.memoizedState按照顺序克隆到了workInProgress.memoizedState中，经过克隆，内部属性(hook.memoizedState)无变动，所以状态也不会丢失
 
 ![alt text](./img/fiber.memoizedState.png)
-
-
-1. 状态 hook 链表（单向链表）
-  - 每个函数组件的 Fiber 节点有一个 memoizedState 字段，指向第一个 hook（比如 useState/useEffect/useReducer/useRef 等）。
-  - 每个 hook 结构体通过 next 字段串成单向链表，顺序就是你在代码里调用 hook 的顺序。
-  - 这个链表保存了所有 hook 的数据（如 state、queue、deps 等），无论是状态还是副作用 hook 都在这条链表上。
-
-2. 副作用 effect 链表（环形链表）
-  - 副作用相关的 hook（如 useEffect/useLayoutEffect/useInsertionEffect）在 mount/update 时，会通过 pushSimpleEffect 把 effect 对象加入到 updateQueue.lastEffect，形成环形链表。
-  - 这个 effect 环形链表只包含本次 render 需要执行的 effect。
-  - effect 链表挂在 Fiber 的 updateQueue.lastEffect 字段上，和 memoizedState 是分开的。
-
-3. 两者关系
-  - 状态 hook 链表（memoizedState）保存所有 hook 的数据，遍历顺序和调用顺序一致。
-  - 副作用 effect 链表只保存需要 commit 阶段执行的 effect，链表节点是 effect 对象，不是 hook 对象。
-  - 副作用 hook（如 useEffect）在自己的 hook 节点的 memoizedState 里保存 effect 对象，并通过 pushSimpleEffect 把 effect 加入 effect 环形链表。
